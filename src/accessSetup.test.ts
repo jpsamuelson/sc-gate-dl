@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkSpotifyCookies, ensureSoundcloudAccess } from './accessSetup';
+import {
+	checkSoundcloudCookies,
+	checkSpotifyCookies,
+	combineSoundcloudAccess,
+	ensureSoundcloudAccess,
+} from './accessSetup';
 
 let dir: string;
 beforeEach(async () => {
@@ -142,5 +147,84 @@ describe('checkSpotifyCookies', () => {
 		const result = await checkSpotifyCookies(path);
 		expect(result.state).toBe('invalid');
 		expect(JSON.stringify(result)).not.toContain('SECRET');
+	});
+});
+
+describe('checkSoundcloudCookies', () => {
+	const file = () => join(dir, 'soundcloud-cookies.json');
+	const write = (cookies: unknown) =>
+		writeFile(file(), JSON.stringify(cookies));
+	const cookie = (value: string) => [
+		{ name: 'oauth_token', value, domain: '.soundcloud.com' },
+	];
+
+	test('a missing file or one without oauth_token is missing', async () => {
+		const ok = async () => ({ ok: true, status: 200 });
+		expect((await checkSoundcloudCookies(file(), ok)).state).toBe('missing');
+		await write([{ name: 'other', value: 'x' }]);
+		expect((await checkSoundcloudCookies(file(), ok)).state).toBe('missing');
+	});
+
+	test('a token SoundCloud rejects is invalid, and is never in the result', async () => {
+		await write(cookie('2-SECRET%20TOKEN'));
+		let sent = '';
+		const result = await checkSoundcloudCookies(file(), async (token) => {
+			sent = token;
+			return { ok: false, status: 401 };
+		});
+		expect(result.state).toBe('invalid');
+		expect(sent).toBe('2-SECRET TOKEN');
+		expect(JSON.stringify(result)).not.toContain('SECRET');
+	});
+
+	test('an accepted token is valid; a network error or 429 is unverifiable', async () => {
+		await write(cookie('t'));
+		expect(
+			(
+				await checkSoundcloudCookies(file(), async () => ({
+					ok: true,
+					status: 200,
+				}))
+			).state,
+		).toBe('valid');
+		expect(
+			(
+				await checkSoundcloudCookies(file(), async () => ({
+					ok: false,
+					status: 429,
+				}))
+			).state,
+		).toBe('unverifiable');
+		expect(
+			(
+				await checkSoundcloudCookies(file(), async () => {
+					throw new Error('network');
+				})
+			).state,
+		).toBe('unverifiable');
+	});
+});
+
+describe('combineSoundcloudAccess', () => {
+	const token = { state: 'valid' as const, renewed: false, action: null };
+
+	test('a valid token with dead browser cookies needs a login', () => {
+		const result = combineSoundcloudAccess(token, { state: 'invalid' });
+		expect(result.state).toBe('invalid');
+		expect(result.action).toContain('bun start --login');
+	});
+
+	test('a valid token with valid, missing or unverifiable cookies stays as it was', () => {
+		for (const state of ['valid', 'unverifiable'] as const) {
+			expect(combineSoundcloudAccess(token, { state })).toEqual(token);
+		}
+		expect(combineSoundcloudAccess(token, { state: 'missing' }).state).toBe(
+			'missing',
+		);
+	});
+
+	test('a failed token check is not overwritten by the cookie result', () => {
+		const bad = { state: 'expired' as const, renewed: false, action: 'x' };
+		expect(combineSoundcloudAccess(bad, { state: 'valid' })).toEqual(bad);
 	});
 });

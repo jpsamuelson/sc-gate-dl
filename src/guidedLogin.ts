@@ -89,18 +89,61 @@ async function withLoginBrowser<T>(
 	}
 }
 
+const SOUNDCLOUD_SESSION_COOKIES = [
+	'oauth_token',
+	'oauth_refresh_token',
+	'_soundcloud_session',
+];
+
+/**
+ * Wait until the web login yielded both values `.env` needs. A profile that is
+ * still logged in has `oauth_token` but no refresh cookie (SoundCloud sets it
+ * only at sign-in), so a timeout names what is missing.
+ */
+export async function captureSoundcloudSession(
+	getCookies: () => Promise<Cookie[]>,
+	getClientId: () => string | null,
+	timeoutMs = LOGIN_TIMEOUT_MS,
+	pollMs = 1000,
+): Promise<SoundcloudSession> {
+	const deadline = Date.now() + timeoutMs;
+	let cookies: Cookie[] = [];
+	while (Date.now() < deadline) {
+		cookies = await getCookies().catch(() => cookies);
+		const session = pickSoundcloudSession(cookies, getClientId());
+		if (session) return session;
+		await timeout(pollMs);
+	}
+	const hasRefresh = pickSoundcloudSession(cookies, 'x') !== null;
+	throw new Error(
+		hasRefresh
+			? 'the page made no request with a client_id'
+			: 'no oauth_refresh_token cookie appeared. SoundCloud sets it only when you sign in; sign out and sign in again',
+	);
+}
+
 /** Visible browser login; the client id is read from the page's own API requests. */
 export function browserSoundcloudLogin(): Promise<SoundcloudSession> {
 	return withLoginBrowser(async (browser) => {
+		const context = browser.defaultBrowserContext();
+		// The shared profile may still hold an old session without a refresh
+		// cookie. Clear it so the sign-in below really happens.
+		const stale = (await context.cookies()).filter(
+			(cookie) =>
+				SOUNDCLOUD_SESSION_COOKIES.includes(cookie.name) &&
+				SOUNDCLOUD_HOST_RE.test(hostOf(cookie)),
+		);
+		if (stale.length > 0) await context.deleteCookie(...stale);
+
 		const page = await browser.newPage();
 		let clientId: string | null = null;
 		page.on('request', (request) => {
 			clientId = clientIdFromUrl(request.url()) ?? clientId;
 		});
-		await page.goto('https://soundcloud.com/');
-		const context = browser.defaultBrowserContext();
-		const session = await waitFor(async () =>
-			pickSoundcloudSession(await context.cookies(), clientId),
+		await page.goto('https://soundcloud.com/signin');
+		const session = await captureSoundcloudSession(
+			() => context.cookies(),
+			() => clientId,
 		);
 		const cookies = (await context.cookies()).filter((cookie) =>
 			SOUNDCLOUD_HOST_RE.test(hostOf(cookie)),

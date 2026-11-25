@@ -8,7 +8,11 @@ import Soundcloud, {
 	type SoundcloudUser,
 } from 'soundcloud.ts';
 import type { AccessResult } from './accessCheck';
-import { ensureSoundcloudAccess } from './accessSetup';
+import {
+	checkSoundcloudCookies,
+	combineSoundcloudAccess,
+	ensureSoundcloudAccess,
+} from './accessSetup';
 import { setEnvValues } from './envFile';
 import {
 	SOUNDCLOUD_TOKEN_FILE,
@@ -992,7 +996,14 @@ export async function checkConfiguredSoundcloudAccess(
 		refreshToken,
 		accessToken: oauthToken,
 	});
-	return ensureSoundcloudAccess({
+	const fetchMe = async (token: string) => {
+		const response = await fetch('https://api-v2.soundcloud.com/me', {
+			headers: { Authorization: `OAuth ${token}` },
+			signal: AbortSignal.timeout(15_000),
+		});
+		return { ok: response.ok, status: response.status };
+	};
+	const tokenResult = await ensureSoundcloudAccess({
 		envPath: process.env.SC_GATE_DL_ENV_FILE ?? '.env',
 		clientId,
 		oauthToken,
@@ -1000,13 +1011,7 @@ export async function checkConfiguredSoundcloudAccess(
 		now,
 		interactive: false,
 		log,
-		fetchMe: async (token) => {
-			const response = await fetch('https://api-v2.soundcloud.com/me', {
-				headers: { Authorization: `OAuth ${token}` },
-				signal: AbortSignal.timeout(15_000),
-			});
-			return { ok: response.ok, status: response.status };
-		},
+		fetchMe,
 		refresh: async () => {
 			const accessToken = await refresher.accessToken();
 			const saved = JSON.parse(
@@ -1018,4 +1023,10 @@ export async function checkConfiguredSoundcloudAccess(
 			return { accessToken, refreshToken: saved.refreshToken };
 		},
 	});
+	const result = combineSoundcloudAccess(
+		tokenResult,
+		await checkSoundcloudCookies('soundcloud-cookies.json', fetchMe),
+	);
+	if (result !== tokenResult && result.action) log(result.action);
+	return result;
 }

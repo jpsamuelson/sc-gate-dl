@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Cookie } from 'puppeteer';
 import {
+	captureSoundcloudSession,
 	clientIdFromUrl,
 	pickSoundcloudSession,
 	pickSpotifyCookies,
@@ -40,6 +41,40 @@ describe('login capture', () => {
 			cookie('other', '1', '.example.com'),
 		]);
 		expect(picked).toHaveLength(1);
+	});
+});
+
+describe('captureSoundcloudSession', () => {
+	const refresh = cookie('oauth_refresh_token', 'r1', '.soundcloud.com');
+
+	test('returns the session once client id and refresh cookie are there', async () => {
+		let calls = 0;
+		const session = await captureSoundcloudSession(
+			async () => (++calls < 3 ? [] : [refresh]),
+			() => 'cid',
+			1_000,
+			1,
+		);
+		expect(session).toEqual({ clientId: 'cid', refreshToken: 'r1' });
+	});
+
+	test('names what is missing instead of waiting for ten minutes', async () => {
+		await expect(
+			captureSoundcloudSession(
+				async () => [],
+				() => 'cid',
+				30,
+				5,
+			),
+		).rejects.toThrow('no oauth_refresh_token cookie');
+		await expect(
+			captureSoundcloudSession(
+				async () => [refresh],
+				() => null,
+				30,
+				5,
+			),
+		).rejects.toThrow('no request with a client_id');
 	});
 });
 

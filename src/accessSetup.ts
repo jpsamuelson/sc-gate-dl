@@ -54,6 +54,72 @@ export async function ensureSoundcloudAccess(
 	return result;
 }
 
+export interface SoundcloudCookieStatus {
+	state: 'valid' | 'missing' | 'invalid' | 'unverifiable';
+}
+
+/**
+ * Browser gates use `soundcloud-cookies.json`, not the token in `.env`. The two
+ * can drift apart, so the cookie's own `oauth_token` is checked against SoundCloud
+ * as well. A network error or a rate limit is `unverifiable`, never `invalid`.
+ */
+export async function checkSoundcloudCookies(
+	path = 'soundcloud-cookies.json',
+	fetchMe: (token: string) => Promise<{ ok: boolean; status: number }>,
+): Promise<SoundcloudCookieStatus> {
+	let token: string | undefined;
+	try {
+		const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+		const cookie = Array.isArray(parsed)
+			? (parsed as { name?: unknown; value?: unknown }[]).find(
+					(c) => c?.name === 'oauth_token',
+				)
+			: undefined;
+		if (typeof cookie?.value === 'string' && cookie.value) {
+			try {
+				token = decodeURIComponent(cookie.value);
+			} catch {
+				token = cookie.value;
+			}
+		}
+	} catch {
+		return { state: 'missing' };
+	}
+	if (!token) return { state: 'missing' };
+	try {
+		const response = await fetchMe(token);
+		if (response.ok) return { state: 'valid' };
+		return {
+			state:
+				response.status === 401 || response.status === 403
+					? 'invalid'
+					: 'unverifiable',
+		};
+	} catch {
+		return { state: 'unverifiable' };
+	}
+}
+
+/**
+ * The token alone is not enough: browser gates run on the saved cookies. Only a
+ * valid token is downgraded; a token problem is reported as it is.
+ */
+export function combineSoundcloudAccess(
+	token: AccessResult,
+	cookies: SoundcloudCookieStatus,
+): AccessResult {
+	if (token.state !== 'valid') return token;
+	if (cookies.state === 'invalid' || cookies.state === 'missing') {
+		return {
+			state: cookies.state,
+			renewed: token.renewed,
+			action:
+				'The saved SoundCloud browser login is missing or no longer accepted. Run `bun start --login` and log in to SoundCloud again.',
+		};
+	}
+	return token;
+}
+
 export interface SpotifyCookieStatus {
 	state: 'present' | 'missing' | 'invalid' | 'expired';
 	/** Spotify gates fail mid-download without a login, so it is always checked. */
